@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
-import json
 import datetime
 from pathlib import Path
-import hashlib
 import plotly.express as px
 import plotly.graph_objects as go
 import smtplib
@@ -14,6 +12,10 @@ import io
 import time
 import base64
 import openpyxl
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # Configure page
 st.set_page_config(
@@ -77,6 +79,24 @@ EMAIL_SENDER = st.secrets.get("email_sender", "your_email@example.com")
 EMAIL_PASSWORD = st.secrets.get("email_password", "your_email_password")
 SMTP_SERVER = st.secrets.get("smtp_server", "smtp.gmail.com")
 SMTP_PORT = st.secrets.get("smtp_port", 587)
+GOOGLE_SHEET_URL = st.secrets.get("GOOGLE_SHEET_URL", "your-google-sheet-url")
+DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "your-drive-folder-id")
+
+# Initialize Google Sheets and Drive API
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+sheets_client = gspread.authorize(creds)
+drive_service = build("drive", "v3", credentials=creds)
+
+# Open Google Sheet
+try:
+    sheet = sheets_client.open_by_url(GOOGLE_SHEET_URL).sheet1
+except Exception as e:
+    st.error(f"Failed to connect to Google Sheets: {str(e)}")
+    st.stop()
 
 # Initialize session state
 if 'user_answers' not in st.session_state:
@@ -122,28 +142,93 @@ correct_answers = {
     "q8": "a",  # Show only rows where Category = "Food"
 }
 
-# File paths for data storage
-SUBMISSIONS_FILE = "test_submissions.json"
-
 # Image for Question 8
 QUESTION_8_IMAGE = "https://raw.githubusercontent.com/MrSingh529/excel-practice-test/main/images/pivot_table_slicer.png"
 
-def load_submissions():
-    """Load existing submissions from file"""
+def upload_to_drive(file_data, filename, folder_id):
+    """Upload a file to Google Drive and return its shareable link"""
     try:
-        if Path(SUBMISSIONS_FILE).exists():
-            with open(SUBMISSIONS_FILE, 'r') as f:
-                return json.load(f)
-    except:
-        pass
-    return []
+        file_metadata = {
+            "name": filename,
+            "parents": [folder_id]
+        }
+        media = MediaIoBaseUpload(io.BytesIO(file_data), mimetype="image/jpeg")
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id"
+        ).execute()
+        
+        # Make the file publicly accessible
+        drive_service.permissions().create(
+            fileId=file["id"],
+            body={"role": "reader", "type": "anyone"}
+        ).execute()
+        
+        # Get the shareable link
+        file_link = f"https://drive.google.com/file/d/{file['id']}/view"
+        return file_link
+    except Exception as e:
+        st.error(f"Failed to upload to Google Drive: {str(e)}")
+        return None
+
+def load_submissions():
+    """Load submissions from Google Sheets"""
+    try:
+        records = sheet.get_all_records()
+        submissions = []
+        for record in records:
+            answers = {}
+            for key in record:
+                if key.startswith("Q") and key.endswith("Screenshot URL"):
+                    answers[key.lower().replace(" ", "_")] = record[key]
+                elif key.startswith("Q"):
+                    answers[key.lower()] = record[key]
+            submissions.append({
+                "timestamp": record["Timestamp"],
+                "user_info": {
+                    "name": record["Name"],
+                    "employee_id": record["Employee ID"],
+                    "department": record["Department"],
+                    "email": record["Email"]
+                },
+                "score": int(record["MCQ Score"].split("/")[0]),
+                "total": int(record["MCQ Score"].split("/")[1]),
+                "percentage": float(record["Percentage"].replace("%", "")),
+                "answers": answers
+            })
+        return submissions
+    except Exception as e:
+        st.error(f"Failed to load submissions: {str(e)}")
+        return []
 
 def save_submission(submission):
-    """Save a new submission"""
-    submissions = load_submissions()
-    submissions.append(submission)
-    with open(SUBMISSIONS_FILE, 'w') as f:
-        json.dump(submissions, f, indent=2)
+    """Save a new submission to Google Sheets"""
+    try:
+        row = [
+            submission["timestamp"],
+            submission["user_info"]["name"],
+            submission["user_info"]["employee_id"],
+            submission["user_info"]["department"],
+            submission["user_info"]["email"],
+            f"{submission['score']}/{submission['total']}",
+            f"{submission['percentage']:.1f}%",
+            "PASS" if submission["percentage"] >= 70 else "FAIL",
+            submission["answers"].get("q1", ""),
+            submission["answers"].get("q2", ""),
+            submission["answers"].get("q3", ""),
+            submission["answers"].get("q4", ""),
+            submission["answers"].get("q5", ""),
+            submission["answers"].get("q6", ""),
+            submission["answers"].get("q7", ""),
+            submission["answers"].get("q8", ""),
+            submission["answers"].get("q9a_screenshot_url", ""),
+            submission["answers"].get("q9b_screenshot_url", ""),
+            submission["answers"].get("q10_screenshot_url", "")
+        ]
+        sheet.append_row(row)
+    except Exception as e:
+        st.error(f"Failed to save submission: {str(e)}")
 
 def calculate_score(user_answers):
     """Calculate test score for MCQs only"""
@@ -252,7 +337,7 @@ def update_timer():
 # Sidebar navigation
 st.sidebar.title("Navigation")
 page = st.sidebar.selectbox("Choose a page:", 
-    ["🏠 Home", "📝 Take Test", "👨‍💼 Admin Dashboard"])  # Removed Data Analysis page
+    ["🏠 Home", "📝 Take Test", "👨‍💼 Admin Dashboard"])
 
 if page == "🏠 Home":
     st.markdown('<h1 class="main-header">📊 Excel Practice Test</h1>', unsafe_allow_html=True)
@@ -322,7 +407,7 @@ elif page == "📝 Take Test":
         <strong>📝 Instructions:</strong><br>
         • Answer all 10 questions (8 multiple-choice and 2 PivotTable questions)<br>
         • For multiple-choice, select the best answer<br>
-        • For PivotTable questions (9 & 10), download the Employee Data as an Excel file, create the PivotTables in Excel, and upload screenshots of your PivotTables<br>
+        • For PivotTable questions (9 & 10), download the Employee Data as an Excel file, create the PivotTables in Excel, and upload screenshots of your PivotTables (max 5 MB each)<br>
         • PivotTable questions will be graded manually by admins<br>
         • Review the employee data table for context<br>
         • Submit your answers within 30 minutes<br>
@@ -438,7 +523,7 @@ elif page == "📝 Take Test":
         
         # PivotTable Questions
         st.markdown("## Section C: PivotTable Questions")
-        st.markdown("**Note**: These questions require you to create PivotTables in Excel using the downloaded Employee Data file. Please upload screenshots of your PivotTables below. These will be reviewed manually by admins.")
+        st.markdown("**Note**: These questions require you to create PivotTables in Excel using the downloaded Employee Data file. Please upload screenshots of your PivotTables below (max 5 MB each). These will be reviewed manually by admins.")
         
         # Question 9
         st.markdown("""
@@ -451,18 +536,33 @@ elif page == "📝 Take Test":
         
         # Question 9a: Upload screenshot
         st.markdown("**9a. Total Amount Due by Region**")
-        q9a_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for 9a (PNG/JPG)", type=["png", "jpg", "jpeg"], key="q9a_screenshot")
+        q9a_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for 9a (PNG/JPG, max 5 MB)", type=["png", "jpg", "jpeg"], key="q9a_screenshot")
         if q9a_screenshot:
-            # Convert uploaded file to base64 for storage
-            st.session_state.user_answers["q9a_screenshot"] = base64.b64encode(q9a_screenshot.read()).decode('utf-8')
-            st.image(q9a_screenshot, caption="Uploaded PivotTable for 9a", use_column_width=True)
+            # Check file size (5 MB = 5 * 1024 * 1024 bytes)
+            file_data = q9a_screenshot.read()
+            if len(file_data) > 5 * 1024 * 1024:
+                st.error("File size exceeds 5 MB limit. Please upload a smaller file.")
+            else:
+                # Upload to Google Drive
+                filename = f"{name}_{employee_id}_q9a_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                q9a_screenshot_url = upload_to_drive(file_data, filename, DRIVE_FOLDER_ID)
+                if q9a_screenshot_url:
+                    st.session_state.user_answers["q9a_screenshot_url"] = q9a_screenshot_url
+                    st.image(file_data, caption="Uploaded PivotTable for 9a", use_column_width=True)
         
         # Question 9b: Upload screenshot
         st.markdown("**9b. Total Amount Due by Department**")
-        q9b_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for 9b (PNG/JPG)", type=["png", "jpg", "jpeg"], key="q9b_screenshot")
+        q9b_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for 9b (PNG/JPG, max 5 MB)", type=["png", "jpg", "jpeg"], key="q9b_screenshot")
         if q9b_screenshot:
-            st.session_state.user_answers["q9b_screenshot"] = base64.b64encode(q9b_screenshot.read()).decode('utf-8')
-            st.image(q9b_screenshot, caption="Uploaded PivotTable for 9b", use_column_width=True)
+            file_data = q9b_screenshot.read()
+            if len(file_data) > 5 * 1024 * 1024:
+                st.error("File size exceeds 5 MB limit. Please upload a smaller file.")
+            else:
+                filename = f"{name}_{employee_id}_q9b_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                q9b_screenshot_url = upload_to_drive(file_data, filename, DRIVE_FOLDER_ID)
+                if q9b_screenshot_url:
+                    st.session_state.user_answers["q9b_screenshot_url"] = q9b_screenshot_url
+                    st.image(file_data, caption="Uploaded PivotTable for 9b", use_column_width=True)
         
         # Question 10
         st.markdown("""
@@ -471,10 +571,17 @@ elif page == "📝 Take Test":
         </div>
         """, unsafe_allow_html=True)
         
-        q10_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for Question 10 (PNG/JPG)", type=["png", "jpg", "jpeg"], key="q10_screenshot")
+        q10_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for Question 10 (PNG/JPG, max 5 MB)", type=["png", "jpg", "jpeg"], key="q10_screenshot")
         if q10_screenshot:
-            st.session_state.user_answers["q10_screenshot"] = base64.b64encode(q10_screenshot.read()).decode('utf-8')
-            st.image(q10_screenshot, caption="Uploaded PivotTable for Question 10", use_column_width=True)
+            file_data = q10_screenshot.read()
+            if len(file_data) > 5 * 1024 * 1024:
+                st.error("File size exceeds 5 MB limit. Please upload a smaller file.")
+            else:
+                filename = f"{name}_{employee_id}_q10_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                q10_screenshot_url = upload_to_drive(file_data, filename, DRIVE_FOLDER_ID)
+                if q10_screenshot_url:
+                    st.session_state.user_answers["q10_screenshot_url"] = q10_screenshot_url
+                    st.image(file_data, caption="Uploaded PivotTable for Question 10", use_column_width=True)
         
         # Submit button
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -483,9 +590,9 @@ elif page == "📝 Take Test":
                 # Validate user info
                 if not all([name, employee_id, department, email]):
                     st.error("⚠️ Please fill in all required information fields!")
-                elif len({k: v for k, v in st.session_state.user_answers.items() if k.startswith('q') and not k.endswith('_screenshot')}) < len(correct_answers):
-                    st.error(f"⚠️ Please answer all multiple-choice questions! You have answered {len({k: v for k, v in st.session_state.user_answers.items() if k.startswith('q') and not k.endswith('_screenshot')})} out of {len(correct_answers)} MCQs.")
-                elif not all(st.session_state.user_answers.get(key) for key in ["q9a_screenshot", "q9b_screenshot", "q10_screenshot"]):
+                elif len({k: v for k, v in st.session_state.user_answers.items() if k.startswith('q') and not k.endswith('_screenshot_url')}) < len(correct_answers):
+                    st.error(f"⚠️ Please answer all multiple-choice questions! You have answered {len({k: v for k, v in st.session_state.user_answers.items() if k.startswith('q') and not k.endswith('_screenshot_url')})} out of {len(correct_answers)} MCQs.")
+                elif not all(st.session_state.user_answers.get(key) for key in ["q9a_screenshot_url", "q9b_screenshot_url", "q10_screenshot_url"]):
                     st.error("⚠️ Please upload screenshots for all PivotTable questions (9a, 9b, and 10)!")
                 else:
                     # Calculate score for MCQs only
@@ -502,7 +609,7 @@ elif page == "📝 Take Test":
                         "percentage": percentage
                     }
                     
-                    # Save submission
+                    # Save submission to Google Sheets
                     save_submission(submission)
                     
                     # Send email to user
@@ -663,7 +770,7 @@ elif page == "👨‍💼 Admin Dashboard":
                 dist_df = pd.DataFrame.from_dict(detail["Answer Distribution"], orient="index", columns=["Count"])
                 st.dataframe(dist_df, use_container_width=True)
             
-            # Detailed submissions table with PivotTable screenshots
+            # Detailed submissions table with PivotTable screenshot links
             st.subheader("📋 All Submissions")
             
             display_data = []
@@ -706,33 +813,62 @@ elif page == "👨‍💼 Admin Dashboard":
                     st.write(row["Status"])
                 with col9:
                     if st.button("View Q9a", key=f"q9a_{idx}"):
-                        screenshot = submissions[idx]["answers"].get("q9a_screenshot")
-                        if screenshot:
-                            st.image(base64.b64decode(screenshot), caption=f"Q9a PivotTable - {row['Name']}", use_column_width=True)
+                        url = submissions[idx]["answers"].get("q9a_screenshot_url")
+                        if url:
+                            st.markdown(f"[View Q9a PivotTable]({url})")
                         else:
                             st.warning("No screenshot uploaded.")
                 with col10:
                     if st.button("View Q9b", key=f"q9b_{idx}"):
-                        screenshot = submissions[idx]["answers"].get("q9b_screenshot")
-                        if screenshot:
-                            st.image(base64.b64decode(screenshot), caption=f"Q9b PivotTable - {row['Name']}", use_column_width=True)
+                        url = submissions[idx]["answers"].get("q9b_screenshot_url")
+                        if url:
+                            st.markdown(f"[View Q9b PivotTable]({url})")
                         else:
                             st.warning("No screenshot uploaded.")
                 with col11:
                     if st.button("View Q10", key=f"q10_{idx}"):
-                        screenshot = submissions[idx]["answers"].get("q10_screenshot")
-                        if screenshot:
-                            st.image(base64.b64decode(screenshot), caption=f"Q10 PivotTable - {row['Name']}", use_column_width=True)
+                        url = submissions[idx]["answers"].get("q10_screenshot_url")
+                        if url:
+                            st.markdown(f"[View Q10 PivotTable]({url})")
                         else:
                             st.warning("No screenshot uploaded.")
             
-            # Download submissions
-            if st.button("📥 Download All Submissions (JSON)"):
+            # Download submissions as Excel
+            if st.button("📥 Download All Submissions (Excel)"):
+                excel_data = []
+                for s in submissions:
+                    row = {
+                        "Timestamp": s['timestamp'][:19].replace('T', ' '),
+                        "Name": s['user_info']['name'],
+                        "Employee ID": s['user_info']['employee_id'],
+                        "Department": s['user_info']['department'],
+                        "Email": s['user_info']['email'],
+                        "MCQ Score": f"{s['score']}/{s['total']}",
+                        "Percentage": f"{s['percentage']:.1f}%",
+                        "Status": "PASS" if s['percentage'] >= 70 else "FAIL",
+                        "Q1": s['answers'].get("q1", ""),
+                        "Q2": s['answers'].get("q2", ""),
+                        "Q3": s['answers'].get("q3", ""),
+                        "Q4": s['answers'].get("q4", ""),
+                        "Q5": s['answers'].get("q5", ""),
+                        "Q6": s['answers'].get("q6", ""),
+                        "Q7": s['answers'].get("q7", ""),
+                        "Q8": s['answers'].get("q8", ""),
+                        "Q9a Screenshot URL": s['answers'].get("q9a_screenshot_url", ""),
+                        "Q9b Screenshot URL": s['answers'].get("q9b_screenshot_url", ""),
+                        "Q10 Screenshot URL": s['answers'].get("q10_screenshot_url", "")
+                    }
+                    excel_data.append(row)
+                
+                df = pd.DataFrame(excel_data)
+                excel_buffer = io.BytesIO()
+                df.to_excel(excel_buffer, index=False, engine='openpyxl')
+                excel_buffer.seek(0)
                 st.download_button(
-                    label="Download Submissions",
-                    data=json.dumps(submissions, indent=2),
-                    file_name=f"excel_test_submissions_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
+                    label="Download Submissions as Excel",
+                    data=excel_buffer,
+                    file_name=f"excel_test_submissions_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
         
         if st.button("🚪 Admin Logout"):

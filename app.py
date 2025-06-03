@@ -568,7 +568,7 @@ elif page == "📊 Data Analysis":
                      color_continuous_scale='Blues')
         st.plotly_chart(fig1, use_container_width=True)
         
-        st.subheader  st.subheader("👥 Gender Distribution by Region")
+        st.subheader("👥 Gender Distribution by Region")
         fig3 = px.bar(regional_gender, x='Region', y='Count', color='Gender',
                      title="Employee Count by Region and Gender",
                      barmode='group')

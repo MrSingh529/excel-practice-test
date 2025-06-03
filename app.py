@@ -63,6 +63,9 @@ st.markdown("""
         text-align: center;
         margin: 10px 0;
     }
+    .pivot-input {
+        margin: 5px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -106,6 +109,26 @@ employee_data = [
     {"Employee": "Santosh Kumar Singh", "Gender": "Male", "Marital Status": "Married", "Region": "North", "Location": "Noida", "Department": "TSG & IT Hardware", "Total Amount Due": 47000},
 ]
 
+# Compute correct PivotTable results for Questions 9 and 10
+df = pd.DataFrame(employee_data)
+
+# Question 9a: Total Amount Due by Region
+correct_q9a = df.groupby('Region')['Total Amount Due'].sum().to_dict()
+# Expected: {'East': 200, 'North': 91701, 'South': 2000, 'West': 24723}
+
+# Question 9b: Total Amount Due by Department
+correct_q9b = df.groupby('Department')['Total Amount Due'].sum().to_dict()
+# Expected: {'Accounts': 15300, 'Customer Service Division': 16824, 'Sales': 200, 'TSG & IT Hardware': 86300}
+
+# Question 10: Count of employees by Region and Gender
+correct_q10 = df.groupby(['Region', 'Gender']).size().unstack(fill_value=0).to_dict()
+# Convert to a flat dict for easier comparison
+correct_q10_flat = {}
+for gender, regions in correct_q10.items():
+    for region, count in regions.items():
+        correct_q10_flat[f"{region}_{gender}"] = count
+# Expected: {'East_Female': 1, 'East_Male': 1, 'North_Female': 1, 'North_Male': 5, 'South_Female': 0, 'South_Male': 1, 'West_Female': 1, 'West_Male': 3}
+
 # Correct answers
 correct_answers = {
     "q1": "a",  # True
@@ -116,6 +139,9 @@ correct_answers = {
     "q6": "b",  # IF
     "q7": "a",  # True
     "q8": "a",  # Show only rows where Category = "Food"
+    "q9a": correct_q9a,
+    "q9b": correct_q9b,
+    "q10": correct_q10_flat
 }
 
 # File paths for data storage
@@ -144,10 +170,28 @@ def save_submission(submission):
 def calculate_score(user_answers):
     """Calculate test score"""
     score = 0
-    total = len(correct_answers)
+    total = len(correct_answers)  # Now 10 questions
     for q_id, correct_answer in correct_answers.items():
-        if user_answers.get(q_id) == correct_answer:
-            score += 1
+        user_answer = user_answers.get(q_id)
+        if q_id in ["q9a", "q9b", "q10"]:  # PivotTable questions
+            if user_answer and isinstance(user_answer, dict):
+                # For PivotTable questions, check if all values match within a small tolerance for floats
+                correct = True
+                for key, value in correct_answer.items():
+                    user_value = user_answer.get(key)
+                    try:
+                        user_value = float(user_value) if user_value is not None else 0
+                        if abs(user_value - value) > 0.01:  # Small tolerance for floating-point comparison
+                            correct = False
+                            break
+                    except (ValueError, TypeError):
+                        correct = False
+                        break
+                if correct:
+                    score += 1
+        else:  # Multiple choice questions
+            if user_answer == correct_answer:
+                score += 1
     return score, total
 
 def send_email(recipient, subject, body):
@@ -224,7 +268,12 @@ def create_detailed_analytics(submissions):
     # Question-wise accuracy
     question_accuracy = {}
     for q_id in correct_answers.keys():
-        correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) == correct_answers[q_id])
+        if q_id in ["q9a", "q9b", "q10"]:
+            correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) and all(
+                abs(float(row["answers"][q_id].get(k, 0)) - v) <= 0.01 for k, v in correct_answers[q_id].items()
+            ))
+        else:
+            correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) == correct_answers[q_id])
         total_attempts = len(df)
         question_accuracy[q_id] = (correct_count / total_attempts * 100) if total_attempts > 0 else 0
     
@@ -238,14 +287,20 @@ def create_detailed_analytics(submissions):
     # Individual question analysis
     question_details = []
     for q_id in correct_answers.keys():
-        answers = df["answers"].apply(lambda x: x.get(q_id, "Not answered")).value_counts()
+        if q_id in ["q9a", "q9b", "q10"]:
+            # For PivotTable questions, just show if answers were correct or not
+            answers = df["answers"].apply(lambda x: "Correct" if x.get(q_id) and all(
+                abs(float(x[q_id].get(k, 0)) - v) <= 0.01 for k, v in correct_answers[q_id].items()
+            ) else "Incorrect").value_counts()
+        else:
+            answers = df["answers"].apply(lambda x: x.get(q_id, "Not answered")).value_counts()
         question_details.append({"Question": q_id, "Answer Distribution": answers.to_dict()})
     
     return question_accuracy, performance_over_time, dept_performance, question_details
 
 # Timer logic
 def update_timer():
-    if st.session_state.timer_active and st.session_state.time_remaining > 0:
+    if st.session_stateuestra.timer_active and st.session_state.time_remaining > 0:
         st.session_state.time_remaining -= 1
     if st.session_state.time_remaining <= 0:
         st.session_state.timer_active = False
@@ -269,7 +324,7 @@ if page == "🏠 Home":
     ### 📋 Test Sections:
     - **Section A**: Multiple Choice Questions (8 questions)
     - **Section B**: Data Analysis using Employee Dataset  
-    - **Section C**: PivotTable Understanding
+    - **Section C**: PivotTable Understanding (2 questions)
     
     ### 🎯 Learning Objectives:
     - Master Excel fundamentals
@@ -289,7 +344,7 @@ if page == "🏠 Home":
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.info("**Total Questions**: 8 Multiple Choice")
+        st.info("**Total Questions**: 10 (8 MCQs + 2 PivotTables)")
     with col2:
         st.success("**Time Limit**: 30 minutes")
     with col3:
@@ -324,8 +379,9 @@ elif page == "📝 Take Test":
         st.markdown("""
         <div class="instructions-box">
         <strong>📝 Instructions:</strong><br>
-        • Answer all 8 multiple-choice questions<br>
-        • Select the best answer for each question<br>
+        • Answer all 10 questions (8 multiple-choice and 2 PivotTable questions)<br>
+        • For multiple-choice, select the best answer<br>
+        • For PivotTable questions, input the values as you would see in Excel<br>
         • Review the employee data table for context<br>
         • Submit your answers within 30 minutes<br>
         • You can change answers before final submission
@@ -334,7 +390,7 @@ elif page == "📝 Take Test":
         
         # Timer display
         st.markdown(f"""
-        <div class="Identify the timer">
+        <div class="timer">
         ⏰ Time Remaining: {int(st.session_state.time_remaining // 60)}:{int(st.session_state.time_remaining % 60):02d}
         </div>
         """, unsafe_allow_html=True)
@@ -346,6 +402,13 @@ elif page == "📝 Take Test":
         # Update timer every second
         st_autorefresh = st.empty()
         update_timer()
+        
+        # Employee Data Display (moved up so it's available for all questions)
+        st.markdown("## Section B: Employee Data Reference")
+        st.markdown("*Use this data to understand the context for the questions below:*")
+        
+        df = pd.DataFrame(employee_data)
+        st.dataframe(df, use_container_width=True)
         
         # Questions
         st.markdown("## Section A: Multiple Choice Questions")
@@ -394,7 +457,7 @@ elif page == "📝 Take Test":
             }
         ]
         
-        # Shuffle questions
+        # Shuffle multiple-choice questions
         if not st.session_state.shuffled_questions:
             st.session_state.shuffled_questions = random.sample(questions, len(questions))
         
@@ -423,12 +486,73 @@ elif page == "📝 Take Test":
             if selected:
                 st.session_state.user_answers[question['id']] = selected
         
-        # Employee Data Display
-        st.markdown("## Section B: Employee Data Reference")
-        st.markdown("*Use this data to understand the context for the questions above:*")
+        # PivotTable Questions
+        st.markdown("## Section C: PivotTable Questions")
         
-        df = pd.DataFrame(employee_data)
-        st.dataframe(df, use_container_width=True)
+        # Question 9
+        st.markdown("""
+        <div class="question-box">
+        <strong>Question 9:</strong> Using the Employee Data table above, create two PivotTables:<br>
+        a. A PivotTable that shows, for each Region, the total of "Total Amount Due"<br>
+        b. A PivotTable that shows, for each Department, the total of "Total Amount Due"
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Question 9a: Total Amount Due by Region
+        st.markdown("**9a. Total Amount Due by Region**")
+        st.markdown("Enter the total 'Total Amount Due' for each Region:")
+        regions = sorted(correct_q9a.keys())
+        q9a_answers = {}
+        for region in regions:
+            value = st.number_input(
+                f"{region}",
+                min_value=0.0,
+                step=1.0,
+                key=f"q9a_{region}",
+                value=float(st.session_state.user_answers.get("q9a", {}).get(region, 0))
+            )
+            q9a_answers[region] = value
+        st.session_state.user_answers["q9a"] = q9a_answers
+        
+        # Question 9b: Total Amount Due by Department
+        st.markdown("**9b. Total Amount Due by Department**")
+        st.markdown("Enter the total 'Total Amount Due' for each Department:")
+        departments = sorted(correct_q9b.keys())
+        q9b_answers = {}
+        for dept in departments:
+            value = st.number_input(
+                f"{dept}",
+                min_value=0.0,
+                step=1.0,
+                key=f"q9b_{dept}",
+                value=float(st.session_state.user_answers.get("q9b", {}).get(dept, 0))
+            )
+            q9b_answers[dept] = value
+        st.session_state.user_answers["q9b"] = q9b_answers
+        
+        # Question 10
+        st.markdown("""
+        <div class="question-box">
+        <strong>Question 10:</strong> Using the Employee Data table above, build a PivotTable in a new worksheet that shows, for each Region, the count of employees by Gender.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("Enter the count of employees for each Region and Gender combination:")
+        q10_answers = {}
+        regions = sorted(set(r.split('_')[0] for r in correct_q10_flat.keys()))
+        genders = sorted(set(r.split('_')[1] for r in correct_q10_flat.keys()))
+        for region in regions:
+            for gender in genders:
+                key = f"{region}_{gender}"
+                value = st.number_input(
+                    f"{region} - {gender}",
+                    min_value=0,
+                    step=1,
+                    key=f"q10_{key}",
+                    value=int(st.session_state.user_answers.get("q10", {}).get(key, 0))
+                )
+                q10_answers[key] = value
+        st.session_state.user_answers["q10"] = q10_answers
         
         # Submit button
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -437,8 +561,8 @@ elif page == "📝 Take Test":
                 # Validate user info
                 if not all([name, employee_id, department, email]):
                     st.error("⚠️ Please fill in all required information fields!")
-                elif len(st.session_state.user_answers) < len(questions):
-                    st.error(f"⚠️ Please answer all questions! You have answered {len(st.session_state.user_answers)} out of {len(questions)} questions.")
+                elif len(st.session_state.user_answers) < len(correct_answers):
+                    st.error(f"⚠️ Please answer all questions! You have answered {len(st.session_state.user_answers)} out of {len(correct_answers)} questions.")
                 else:
                     # Calculate score
                     score, total = calculate_score(st.session_state.user_answers)
@@ -506,7 +630,13 @@ elif page == "📝 Take Test":
         # Certificate generation for passing users
         if percentage >= 70:
             date = datetime.datetime.now().strftime("%Y-%m-%d")
-            cert_buffer = generate_certificate(st.session_state.user_info["name"], score, total, date)
+            cert_buffer = generate_certificate(
+                st.session_state.user_info["name"],
+                score,
+                total,
+                date
+            )
+
             st.download_button(
                 label="📜 Download Certificate",
                 data=cert_buffer,
@@ -519,11 +649,18 @@ elif page == "📝 Take Test":
         results_data = []
         for i, (q_id, correct_answer) in enumerate(correct_answers.items(), 1):
             user_answer = st.session_state.user_answers.get(q_id, "Not answered")
-            is_correct = user_answer == correct_answer
+            if q_id in ["q9?", "q9b", "q10"]:
+                is_correct = user_answer and isinstance(user_answer, dict) and all(
+                    abs(float(user_answer.get(k, 0)) - v) <= 0.01 for k, v in correct_answer.items()
+                )
+                user_answer_display = str(user_answer) if user_answer != "Not answered" else user_answer
+            else:
+                is_correct = user_answer == correct_answer
+                user_answer_display = user_answer.upper() if user_answer != "Not answered" else user_answer
             results_data.append({
                 "Question": i,
-                "Your Answer": user_answer.upper() if user_answer != "Not answered" else user_answer,
-                "Correct Answer": correct_answer.upper(),
+                "Your Answer": user_answer_display,
+                "Correct Answer": str(correct_answer),
                 "Result": "✅ Correct" if is_correct else "❌ Incorrect"
             })
         

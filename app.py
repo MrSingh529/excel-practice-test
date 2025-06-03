@@ -10,9 +10,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import random
-import base64
 from fpdf import FPDF
 import io
+import time
 
 # Configure page
 st.set_page_config(
@@ -300,7 +300,8 @@ def create_detailed_analytics(submissions):
 
 # Timer logic
 def update_timer():
-    if st.session_stateuestra.timer_active and st.session_state.time_remaining > 0:
+    if st.session_state.timer_active and st.session_state.time_remaining > 0:
+        time.sleep(1)
         st.session_state.time_remaining -= 1
     if st.session_state.time_remaining <= 0:
         st.session_state.timer_active = False

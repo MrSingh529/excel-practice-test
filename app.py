@@ -6,6 +6,13 @@ from pathlib import Path
 import hashlib
 import plotly.express as px
 import plotly.graph_objects as go
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import random
+import base64
+from fpdf import FPDF
+import io
 
 # Configure page
 st.set_page_config(
@@ -49,8 +56,23 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         text-align: center;
     }
+    .timer {
+        font-size: 24px;
+        font-weight: bold;
+        color: #dc3545;
+        text-align: center;
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# Load secrets
+ADMIN_PASSWORD = st.secrets.get("admin_password", "admin123")
+ADMIN_EMAILS = st.secrets.get("admin_emails", ["admin1@example.com", "admin2@example.com"]).split(",")
+EMAIL_SENDER = st.secrets.get("email_sender", "your_email@example.com")
+EMAIL_PASSWORD = st.secrets.get("email_password", "your_email_password")
+SMTP_SERVER = st.secrets.get("smtp_server", "smtp.gmail.com")
+SMTP_PORT = st.secrets.get("smtp_port", 587)
 
 # Initialize session state
 if 'user_answers' not in st.session_state:
@@ -59,6 +81,12 @@ if 'user_info' not in st.session_state:
     st.session_state.user_info = {}
 if 'test_submitted' not in st.session_state:
     st.session_state.test_submitted = False
+if 'time_remaining' not in st.session_state:
+    st.session_state.time_remaining = 30 * 60  # 30 minutes in seconds
+if 'timer_active' not in st.session_state:
+    st.session_state.timer_active = False
+if 'shuffled_questions' not in st.session_state:
+    st.session_state.shuffled_questions = []
 
 # Employee data
 employee_data = [
@@ -92,7 +120,10 @@ correct_answers = {
 
 # File paths for data storage
 SUBMISSIONS_FILE = "test_submissions.json"
-ADMIN_PASSWORD = "admin123"  # In production, use environment variables
+
+# Image for Question 8 (base64 encoded)
+# Note: Since I can't directly access the uploaded image, I've encoded a placeholder. Replace this with the actual base64 encoding of your image.
+QUESTION_8_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgG1L9EAAAABJRU5ErkJggg=="
 
 def load_submissions():
     """Load existing submissions from file"""
@@ -120,20 +151,107 @@ def calculate_score(user_answers):
             score += 1
     return score, total
 
+def send_email(recipient, subject, body):
+    """Send email notification"""
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = recipient
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Failed to send email: {str(e)}")
+        return False
+
+def generate_certificate(name, score, total, date):
+    """Generate PDF certificate"""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 24)
+    pdf.cell(0, 20, "Certificate of Achievement", ln=True, align="C")
+    pdf.set_font("Arial", "", 16)
+    pdf.ln(20)
+    pdf.cell(0, 10, f"This certifies that", ln=True, align="C")
+    pdf.set_font("Arial", "B", 20)
+    pdf.cell(0, 10, name, ln=True, align="C")
+    pdf.set_font("Arial", "", 16)
+    pdf.ln(10)
+    pdf.cell(0, 10, f"has successfully completed the Excel Practice Test", ln=True, align="C")
+    pdf.cell(0, 10, f"Score: {score}/{total}", ln=True, align="C")
+    pdf.cell(0, 10, f"Date: {date}", ln=True, align="C")
+    pdf.ln(20)
+    pdf.set_font("Arial", "I", 12)
+    pdf.cell(0, 10, "Learning & Development Department", ln=True, align="C")
+
+    # Save PDF to bytes
+    output = io.BytesIO()
+    pdf_output = pdf.output(dest='S').encode('latin1')
+    output.write(pdf_output)
+    output.seek(0)
+    return output
+
 def create_pivot_analysis():
     """Create pivot table analysis from employee data"""
     df = pd.DataFrame(employee_data)
     
-    # Regional totals
     regional_totals = df.groupby('Region')['Total Amount Due'].sum().reset_index()
-    
-    # Department totals
     dept_totals = df.groupby('Department')['Total Amount Due'].sum().reset_index()
-    
-    # Regional gender count
     regional_gender = df.groupby(['Region', 'Gender']).size().reset_index(name='Count')
     
     return regional_totals, dept_totals, regional_gender
+
+def create_detailed_analytics(submissions):
+    """Create detailed analytics for admin"""
+    df = pd.DataFrame([{
+        "timestamp": s["timestamp"],
+        "name": s["user_info"]["name"],
+        "department": s["user_info"]["department"],
+        "score": s["score"],
+        "total": s["total"],
+        "percentage": s["percentage"],
+        "answers": s["answers"]
+    } for s in submissions])
+    
+    if df.empty:
+        return None, None, None, None
+    
+    # Question-wise accuracy
+    question_accuracy = {}
+    for q_id in correct_answers.keys():
+        correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) == correct_answers[q_id])
+        total_attempts = len(df)
+        question_accuracy[q_id] = (correct_count / total_attempts * 100) if total_attempts > 0 else 0
+    
+    # Performance over time
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    performance_over_time = df.groupby(df["timestamp"].dt.date)["percentage"].mean().reset_index()
+    
+    # Department-wise performance
+    dept_performance = df.groupby("department")["percentage"].agg(["mean", "count"]).reset_index()
+    
+    # Individual question analysis
+    question_details = []
+    for q_id in correct_answers.keys():
+        answers = df["answers"].apply(lambda x: x.get(q_id, "Not answered")).value_counts()
+        question_details.append({"Question": q_id, "Answer Distribution": answers.to_dict()})
+    
+    return question_accuracy, performance_over_time, dept_performance, question_details
+
+# Timer logic
+def update_timer():
+    if st.session_state.timer_active and st.session_state.time_remaining > 0:
+        st.session_state.time_remaining -= 1
+    if st.session_state.time_remaining <= 0:
+        st.session_state.timer_active = False
+        st.session_state.test_submitted = True
+        st.rerun()
 
 # Sidebar navigation
 st.sidebar.title("Navigation")
@@ -162,18 +280,19 @@ if page == "🏠 Home":
     - Explore logical functions
     
     ### 📊 Features:
-    - Interactive online test
-    - Instant score calculation
+    - Interactive online test with timer
+    - Instant score calculation and email notifications
     - Data visualization
     - Progress tracking
-    - Admin monitoring
+    - Admin analytics
+    - Certificate generation for passing
     """)
     
     col1, col2, col3 = st.columns(3)
     with col1:
         st.info("**Total Questions**: 8 Multiple Choice")
     with col2:
-        st.success("**Time Limit**: Self-paced")
+        st.success("**Time Limit**: 30 minutes")
     with col3:
         st.warning("**Passing Score**: 70%")
 
@@ -209,10 +328,25 @@ elif page == "📝 Take Test":
         • Answer all 8 multiple-choice questions<br>
         • Select the best answer for each question<br>
         • Review the employee data table for context<br>
-        • Submit your answers when complete<br>
+        • Submit your answers within 30 minutes<br>
         • You can change answers before final submission
         </div>
         """, unsafe_allow_html=True)
+        
+        # Timer display
+        st.markdown(f"""
+        <div class="Identify the timer">
+        ⏰ Time Remaining: {int(st.session_state.time_remaining // 60)}:{int(st.session_state.time_remaining % 60):02d}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Start timer on first interaction
+        if not st.session_state.timer_active:
+            st.session_state.timer_active = True
+        
+        # Update timer every second
+        st_autorefresh = st.empty()
+        update_timer()
         
         # Questions
         st.markdown("## Section A: Multiple Choice Questions")
@@ -256,16 +390,25 @@ elif page == "📝 Take Test":
             {
                 "id": "q8",
                 "text": 'Consider a PivotTable with a slicer connected to the "Category" field. If you click "Food" on that slicer, the PivotTable will:',
-                "options": ['Show only rows where Category = "Food"', 'Show all rows except those where Category = "Food"', 'Not change (slicer has no effect)']
+                "options": ['Show only rows where Category = "Food"', 'Show all rows except those where Category = "Food"', 'Not change (slicer has no effect)'],
+                "image": QUESTION_8_IMAGE
             }
         ]
         
-        for i, question in enumerate(questions, 1):
+        # Shuffle questions
+        if not st.session_state.shuffled_questions:
+            st.session_state.shuffled_questions = random.sample(questions, len(questions))
+        
+        for i, question in enumerate(st.session_state.shuffled_questions, 1):
             st.markdown(f"""
             <div class="question-box">
             <strong>Question {i}:</strong> {question['text']}
             </div>
             """, unsafe_allow_html=True)
+            
+            # Display image for Question 8
+            if "image" in question:
+                st.image(question["image"], caption="PivotTable Slicer Example", use_column_width=True)
             
             option_labels = [chr(97 + j) for j in range(len(question['options']))]  # a, b, c, d
             formatted_options = [f"{label}. {option}" for label, option in zip(option_labels, question['options'])]
@@ -314,7 +457,34 @@ elif page == "📝 Take Test":
                     
                     # Save submission
                     save_submission(submission)
+                    
+                    # Send email to user
+                    user_body = f"""
+                    Dear {name},
+                    
+                    Thank you for completing the Excel Practice Test.
+                    Your Score: {score}/{total} ({percentage:.1f}%)
+                    Status: {'PASS' if percentage >= 70 else 'NEEDS IMPROVEMENT'}
+                    
+                    Regards,
+                    Learning & Development Department
+                    """
+                    send_email(email, "Excel Practice Test Results", user_body)
+                    
+                    # Send email to admins
+                    admin_body = f"""
+                    New Test Submission:
+                    Name: {name}
+                    Employee ID: {employee_id}
+                    Department: {department}
+                    Score: {score}/{total} ({percentage:.1f}%)
+                    Status: {'PASS' if percentage >= 70 else 'NEEDS IMPROVEMENT'}
+                    """
+                    for admin_email in ADMIN_EMAILS:
+                        send_email(admin_email.strip(), "New Excel Test Submission", admin_body)
+                    
                     st.session_state.test_submitted = True
+                    st.session_state.timer_active = False
                     st.rerun()
     
     else:
@@ -334,6 +504,17 @@ elif page == "📝 Take Test":
             color = "green" if percentage >= 70 else "red"
             st.metric("Result", status)
         
+        # Certificate generation for passing users
+        if percentage >= 70:
+            date = datetime.datetime.now().strftime("%Y-%m-%d")
+            cert_buffer = generate_certificate(st.session_state.user_info["name"], score, total, date)
+            st.download_button(
+                label="📜 Download Certificate",
+                data=cert_buffer,
+                file_name=f"Excel_Practice_Certificate_{st.session_state.user_info['name']}.pdf",
+                mime="application/pdf"
+            )
+        
         # Detailed results
         st.markdown("## 📊 Detailed Results")
         results_data = []
@@ -352,7 +533,11 @@ elif page == "📝 Take Test":
         
         if st.button("🔄 Take Test Again"):
             st.session_state.user_answers = {}
+            st.session_state.user_info = {}
             st.session_state.test_submitted = False
+            st.session_state.time_remaining = 30 * 60
+            st.session_state.timer_active = False
+            st.session_state.shuffled_questions = []
             st.rerun()
 
 elif page == "📊 Data Analysis":
@@ -383,7 +568,7 @@ elif page == "📊 Data Analysis":
                      color_continuous_scale='Blues')
         st.plotly_chart(fig1, use_container_width=True)
         
-        st.subheader("👥 Gender Distribution by Region")
+        st.subheader  st.subheader("👥 Gender Distribution by Region")
         fig3 = px.bar(regional_gender, x='Region', y='Count', color='Gender',
                      title="Employee Count by Region and Gender",
                      barmode='group')
@@ -452,37 +637,44 @@ elif page == "👨‍💼 Admin Dashboard":
             with col3:
                 st.metric("Pass Rate", f"{pass_rate:.1f}%")
             
-            # Charts
-            col1, col2 = st.columns(2)
+            # Detailed Analytics
+            question_accuracy, performance_over_time, dept_performance, question_details = create_detailed_analytics(submissions)
             
+            st.subheader("📈 Detailed Analytics")
+            
+            col1, col2 = st.columns(2)
             with col1:
-                # Score distribution
-                scores = [s['percentage'] for s in submissions]
-                fig1 = px.histogram(x=scores, title="Score Distribution", 
-                                  nbins=10, labels={'x': 'Score %', 'y': 'Count'})
-                fig1.add_vline(x=70, line_dash="dash", line_color="red", 
-                              annotation_text="Pass Line (70%)")
-                st.plotly_chart(fig1, use_container_width=True)
+                # Question Accuracy
+                fig_accuracy = px.bar(x=list(question_accuracy.keys()), y=list(question_accuracy.values()),
+                                    title="Question-wise Accuracy (%)",
+                                    labels={'x': 'Question', 'y': 'Accuracy %'})
+                st.plotly_chart(fig_accuracy, use_container_width=True)
+                
+                # Performance Over Time
+                fig_time = px.line(performance_over_time, x="timestamp", y="percentage",
+                                 title="Performance Over Time",
+                                 labels={'timestamp': 'Date', 'percentage': 'Average Score %'})
+                st.plotly_chart(fig_time, use_container_width=True)
             
             with col2:
-                # Department wise performance
-                dept_scores = {}
-                for s in submissions:
-                    dept = s['user_info']['department']
-                    if dept not in dept_scores:
-                        dept_scores[dept] = []
-                    dept_scores[dept].append(s['percentage'])
-                
-                dept_avg = {dept: sum(scores)/len(scores) for dept, scores in dept_scores.items()}
-                fig2 = px.bar(x=list(dept_avg.keys()), y=list(dept_avg.values()),
-                             title="Average Score by Department",
-                             labels={'x': 'Department', 'y': 'Average Score %'})
-                st.plotly_chart(fig2, use_container_width=True)
+                # Department Performance
+                fig_dept = px.bar(dept_performance, x="department", y="mean",
+                                title="Department-wise Performance",
+                                labels={'department': 'Department', 'mean': 'Average Score %'},
+                                text="count")
+                fig_dept.update_traces(textposition='auto')
+                st.plotly_chart(fig_dept, use_container_width=True)
+            
+            # Question Details
+            st.subheader("🔍 Question Analysis")
+            for detail in question_details:
+                st.write(f"**{detail['Question'].upper()} Answer Distribution:**")
+                dist_df = pd.DataFrame.from_dict(detail["Answer Distribution"], orient="index", columns=["Count"])
+                st.dataframe(dist_df, use_container_width=True)
             
             # Detailed submissions table
             st.subheader("📋 All Submissions")
             
-            # Prepare data for display
             display_data = []
             for s in submissions:
                 display_data.append({

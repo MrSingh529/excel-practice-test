@@ -121,9 +121,8 @@ correct_answers = {
 # File paths for data storage
 SUBMISSIONS_FILE = "test_submissions.json"
 
-# Image for Question 8 (base64 encoded)
-# Note: Since I can't directly access the uploaded image, I've encoded a placeholder. Replace this with the actual base64 encoding of your image.
-QUESTION_8_IMAGE = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgG1L9EAAAABJRU5ErkJggg=="
+# Image for Question 8
+QUESTION_8_IMAGE = "https://raw.githubusercontent.com/MrSingh529/excel-practice-test/main/images/pivot_table_slicer.png"
 
 def load_submissions():
     """Load existing submissions from file"""

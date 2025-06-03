@@ -9,10 +9,11 @@ import plotly.graph_objects as go
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import random
 from fpdf import FPDF
 import io
 import time
+import base64
+import openpyxl
 
 # Configure page
 st.set_page_config(
@@ -109,27 +110,7 @@ employee_data = [
     {"Employee": "Santosh Kumar Singh", "Gender": "Male", "Marital Status": "Married", "Region": "North", "Location": "Noida", "Department": "TSG & IT Hardware", "Total Amount Due": 47000},
 ]
 
-# Compute correct PivotTable results for Questions 9 and 10
-df = pd.DataFrame(employee_data)
-
-# Question 9a: Total Amount Due by Region
-correct_q9a = df.groupby('Region')['Total Amount Due'].sum().to_dict()
-# Expected: {'East': 200, 'North': 91701, 'South': 2000, 'West': 24723}
-
-# Question 9b: Total Amount Due by Department
-correct_q9b = df.groupby('Department')['Total Amount Due'].sum().to_dict()
-# Expected: {'Accounts': 15300, 'Customer Service Division': 16824, 'Sales': 200, 'TSG & IT Hardware': 86300}
-
-# Question 10: Count of employees by Region and Gender
-correct_q10 = df.groupby(['Region', 'Gender']).size().unstack(fill_value=0).to_dict()
-# Convert to a flat dict for easier comparison
-correct_q10_flat = {}
-for gender, regions in correct_q10.items():
-    for region, count in regions.items():
-        correct_q10_flat[f"{region}_{gender}"] = count
-# Expected: {'East_Female': 1, 'East_Male': 1, 'North_Female': 1, 'North_Male': 5, 'South_Female': 0, 'South_Male': 1, 'West_Female': 1, 'West_Male': 3}
-
-# Correct answers
+# Correct answers for MCQs only
 correct_answers = {
     "q1": "a",  # True
     "q2": "b",  # Column heading
@@ -139,9 +120,6 @@ correct_answers = {
     "q6": "b",  # IF
     "q7": "a",  # True
     "q8": "a",  # Show only rows where Category = "Food"
-    "q9a": correct_q9a,
-    "q9b": correct_q9b,
-    "q10": correct_q10_flat
 }
 
 # File paths for data storage
@@ -168,30 +146,12 @@ def save_submission(submission):
         json.dump(submissions, f, indent=2)
 
 def calculate_score(user_answers):
-    """Calculate test score"""
+    """Calculate test score for MCQs only"""
     score = 0
-    total = len(correct_answers)  # Now 10 questions
+    total = len(correct_answers)  # 8 MCQs
     for q_id, correct_answer in correct_answers.items():
-        user_answer = user_answers.get(q_id)
-        if q_id in ["q9a", "q9b", "q10"]:  # PivotTable questions
-            if user_answer and isinstance(user_answer, dict):
-                # For PivotTable questions, check if all values match within a small tolerance for floats
-                correct = True
-                for key, value in correct_answer.items():
-                    user_value = user_answer.get(key)
-                    try:
-                        user_value = float(user_value) if user_value is not None else 0
-                        if abs(user_value - value) > 0.01:  # Small tolerance for floating-point comparison
-                            correct = False
-                            break
-                    except (ValueError, TypeError):
-                        correct = False
-                        break
-                if correct:
-                    score += 1
-        else:  # Multiple choice questions
-            if user_answer == correct_answer:
-                score += 1
+        if user_answers.get(q_id) == correct_answer:
+            score += 1
     return score, total
 
 def send_email(recipient, subject, body):
@@ -227,8 +187,10 @@ def generate_certificate(name, score, total, date):
     pdf.set_font("Arial", "", 16)
     pdf.ln(10)
     pdf.cell(0, 10, f"has successfully completed the Excel Practice Test", ln=True, align="C")
-    pdf.cell(0, 10, f"Score: {score}/{total}", ln=True, align="C")
+    pdf.cell(0, 10, f"Score: {score}/{total} (MCQs only)", ln=True, align="C")
     pdf.cell(0, 10, f"Date: {date}", ln=True, align="C")
+    pdf.ln(10)
+    pdf.cell(0, 10, "Note: PivotTable questions (9 & 10) are graded separately by admins.", ln=True, align="C")
     pdf.ln(20)
     pdf.set_font("Arial", "I", 12)
     pdf.cell(0, 10, "Learning & Development Department", ln=True, align="C")
@@ -239,16 +201,6 @@ def generate_certificate(name, score, total, date):
     output.write(pdf_output)
     output.seek(0)
     return output
-
-def create_pivot_analysis():
-    """Create pivot table analysis from employee data"""
-    df = pd.DataFrame(employee_data)
-    
-    regional_totals = df.groupby('Region')['Total Amount Due'].sum().reset_index()
-    dept_totals = df.groupby('Department')['Total Amount Due'].sum().reset_index()
-    regional_gender = df.groupby(['Region', 'Gender']).size().reset_index(name='Count')
-    
-    return regional_totals, dept_totals, regional_gender
 
 def create_detailed_analytics(submissions):
     """Create detailed analytics for admin"""
@@ -265,15 +217,10 @@ def create_detailed_analytics(submissions):
     if df.empty:
         return None, None, None, None
     
-    # Question-wise accuracy
+    # Question-wise accuracy for MCQs
     question_accuracy = {}
     for q_id in correct_answers.keys():
-        if q_id in ["q9a", "q9b", "q10"]:
-            correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) and all(
-                abs(float(row["answers"][q_id].get(k, 0)) - v) <= 0.01 for k, v in correct_answers[q_id].items()
-            ))
-        else:
-            correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) == correct_answers[q_id])
+        correct_count = sum(1 for _, row in df.iterrows() if row["answers"].get(q_id) == correct_answers[q_id])
         total_attempts = len(df)
         question_accuracy[q_id] = (correct_count / total_attempts * 100) if total_attempts > 0 else 0
     
@@ -287,13 +234,7 @@ def create_detailed_analytics(submissions):
     # Individual question analysis
     question_details = []
     for q_id in correct_answers.keys():
-        if q_id in ["q9a", "q9b", "q10"]:
-            # For PivotTable questions, just show if answers were correct or not
-            answers = df["answers"].apply(lambda x: "Correct" if x.get(q_id) and all(
-                abs(float(x[q_id].get(k, 0)) - v) <= 0.01 for k, v in correct_answers[q_id].items()
-            ) else "Incorrect").value_counts()
-        else:
-            answers = df["answers"].apply(lambda x: x.get(q_id, "Not answered")).value_counts()
+        answers = df["answers"].apply(lambda x: x.get(q_id, "Not answered")).value_counts()
         question_details.append({"Question": q_id, "Answer Distribution": answers.to_dict()})
     
     return question_accuracy, performance_over_time, dept_performance, question_details
@@ -311,7 +252,7 @@ def update_timer():
 # Sidebar navigation
 st.sidebar.title("Navigation")
 page = st.sidebar.selectbox("Choose a page:", 
-    ["🏠 Home", "📝 Take Test", "📊 Data Analysis", "👨‍💼 Admin Dashboard"])
+    ["🏠 Home", "📝 Take Test", "👨‍💼 Admin Dashboard"])  # Removed Data Analysis page
 
 if page == "🏠 Home":
     st.markdown('<h1 class="main-header">📊 Excel Practice Test</h1>', unsafe_allow_html=True)
@@ -337,7 +278,6 @@ if page == "🏠 Home":
     ### 📊 Features:
     - Interactive online test with timer
     - Instant score calculation and email notifications
-    - Data visualization
     - Progress tracking
     - Admin analytics
     - Certificate generation for passing
@@ -349,7 +289,7 @@ if page == "🏠 Home":
     with col2:
         st.success("**Time Limit**: 30 minutes")
     with col3:
-        st.warning("**Passing Score**: 70%")
+        st.warning("**Passing Score**: 70% (MCQs only)")
 
 elif page == "📝 Take Test":
     st.markdown('<h1 class="main-header">📝 Excel Practice Test</h1>', unsafe_allow_html=True)
@@ -382,7 +322,8 @@ elif page == "📝 Take Test":
         <strong>📝 Instructions:</strong><br>
         • Answer all 10 questions (8 multiple-choice and 2 PivotTable questions)<br>
         • For multiple-choice, select the best answer<br>
-        • For PivotTable questions, input the values as you would see in Excel<br>
+        • For PivotTable questions (9 & 10), download the Employee Data as an Excel file, create the PivotTables in Excel, and upload screenshots of your PivotTables<br>
+        • PivotTable questions will be graded manually by admins<br>
         • Review the employee data table for context<br>
         • Submit your answers within 30 minutes<br>
         • You can change answers before final submission
@@ -404,12 +345,23 @@ elif page == "📝 Take Test":
         st_autorefresh = st.empty()
         update_timer()
         
-        # Employee Data Display (moved up so it's available for all questions)
+        # Employee Data Display
         st.markdown("## Section B: Employee Data Reference")
         st.markdown("*Use this data to understand the context for the questions below:*")
         
         df = pd.DataFrame(employee_data)
         st.dataframe(df, use_container_width=True)
+        
+        # Download Employee Data as Excel
+        excel_buffer = io.BytesIO()
+        df.to_excel(excel_buffer, index=False, engine='openpyxl')
+        excel_buffer.seek(0)
+        st.download_button(
+            label="📥 Download Employee Data as Excel",
+            data=excel_buffer,
+            file_name="employee_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
         
         # Questions
         st.markdown("## Section A: Multiple Choice Questions")
@@ -458,11 +410,8 @@ elif page == "📝 Take Test":
             }
         ]
         
-        # Shuffle multiple-choice questions
-        if not st.session_state.shuffled_questions:
-            st.session_state.shuffled_questions = random.sample(questions, len(questions))
-        
-        for i, question in enumerate(st.session_state.shuffled_questions, 1):
+        # Display questions in fixed order (no shuffling)
+        for i, question in enumerate(questions, 1):
             st.markdown(f"""
             <div class="question-box">
             <strong>Question {i}:</strong> {question['text']}
@@ -489,6 +438,7 @@ elif page == "📝 Take Test":
         
         # PivotTable Questions
         st.markdown("## Section C: PivotTable Questions")
+        st.markdown("**Note**: These questions require you to create PivotTables in Excel using the downloaded Employee Data file. Please upload screenshots of your PivotTables below. These will be reviewed manually by admins.")
         
         # Question 9
         st.markdown("""
@@ -499,37 +449,20 @@ elif page == "📝 Take Test":
         </div>
         """, unsafe_allow_html=True)
         
-        # Question 9a: Total Amount Due by Region
+        # Question 9a: Upload screenshot
         st.markdown("**9a. Total Amount Due by Region**")
-        st.markdown("Enter the total 'Total Amount Due' for each Region:")
-        regions = sorted(correct_q9a.keys())
-        q9a_answers = {}
-        for region in regions:
-            value = st.number_input(
-                f"{region}",
-                min_value=0.0,
-                step=1.0,
-                key=f"q9a_{region}",
-                value=float(st.session_state.user_answers.get("q9a", {}).get(region, 0))
-            )
-            q9a_answers[region] = value
-        st.session_state.user_answers["q9a"] = q9a_answers
+        q9a_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for 9a (PNG/JPG)", type=["png", "jpg", "jpeg"], key="q9a_screenshot")
+        if q9a_screenshot:
+            # Convert uploaded file to base64 for storage
+            st.session_state.user_answers["q9a_screenshot"] = base64.b64encode(q9a_screenshot.read()).decode('utf-8')
+            st.image(q9a_screenshot, caption="Uploaded PivotTable for 9a", use_column_width=True)
         
-        # Question 9b: Total Amount Due by Department
+        # Question 9b: Upload screenshot
         st.markdown("**9b. Total Amount Due by Department**")
-        st.markdown("Enter the total 'Total Amount Due' for each Department:")
-        departments = sorted(correct_q9b.keys())
-        q9b_answers = {}
-        for dept in departments:
-            value = st.number_input(
-                f"{dept}",
-                min_value=0.0,
-                step=1.0,
-                key=f"q9b_{dept}",
-                value=float(st.session_state.user_answers.get("q9b", {}).get(dept, 0))
-            )
-            q9b_answers[dept] = value
-        st.session_state.user_answers["q9b"] = q9b_answers
+        q9b_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for 9b (PNG/JPG)", type=["png", "jpg", "jpeg"], key="q9b_screenshot")
+        if q9b_screenshot:
+            st.session_state.user_answers["q9b_screenshot"] = base64.b64encode(q9b_screenshot.read()).decode('utf-8')
+            st.image(q9b_screenshot, caption="Uploaded PivotTable for 9b", use_column_width=True)
         
         # Question 10
         st.markdown("""
@@ -538,22 +471,10 @@ elif page == "📝 Take Test":
         </div>
         """, unsafe_allow_html=True)
         
-        st.markdown("Enter the count of employees for each Region and Gender combination:")
-        q10_answers = {}
-        regions = sorted(set(r.split('_')[0] for r in correct_q10_flat.keys()))
-        genders = sorted(set(r.split('_')[1] for r in correct_q10_flat.keys()))
-        for region in regions:
-            for gender in genders:
-                key = f"{region}_{gender}"
-                value = st.number_input(
-                    f"{region} - {gender}",
-                    min_value=0,
-                    step=1,
-                    key=f"q10_{key}",
-                    value=int(st.session_state.user_answers.get("q10", {}).get(key, 0))
-                )
-                q10_answers[key] = value
-        st.session_state.user_answers["q10"] = q10_answers
+        q10_screenshot = st.file_uploader("Upload a screenshot of your PivotTable for Question 10 (PNG/JPG)", type=["png", "jpg", "jpeg"], key="q10_screenshot")
+        if q10_screenshot:
+            st.session_state.user_answers["q10_screenshot"] = base64.b64encode(q10_screenshot.read()).decode('utf-8')
+            st.image(q10_screenshot, caption="Uploaded PivotTable for Question 10", use_column_width=True)
         
         # Submit button
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -562,10 +483,12 @@ elif page == "📝 Take Test":
                 # Validate user info
                 if not all([name, employee_id, department, email]):
                     st.error("⚠️ Please fill in all required information fields!")
-                elif len(st.session_state.user_answers) < len(correct_answers):
-                    st.error(f"⚠️ Please answer all questions! You have answered {len(st.session_state.user_answers)} out of {len(correct_answers)} questions.")
+                elif len({k: v for k, v in st.session_state.user_answers.items() if k.startswith('q') and not k.endswith('_screenshot')}) < len(correct_answers):
+                    st.error(f"⚠️ Please answer all multiple-choice questions! You have answered {len({k: v for k, v in st.session_state.user_answers.items() if k.startswith('q') and not k.endswith('_screenshot')})} out of {len(correct_answers)} MCQs.")
+                elif not all(st.session_state.user_answers.get(key) for key in ["q9a_screenshot", "q9b_screenshot", "q10_screenshot"]):
+                    st.error("⚠️ Please upload screenshots for all PivotTable questions (9a, 9b, and 10)!")
                 else:
-                    # Calculate score
+                    # Calculate score for MCQs only
                     score, total = calculate_score(st.session_state.user_answers)
                     percentage = (score / total) * 100
                     
@@ -587,8 +510,9 @@ elif page == "📝 Take Test":
                     Dear {name},
                     
                     Thank you for completing the Excel Practice Test.
-                    Your Score: {score}/{total} ({percentage:.1f}%)
-                    Status: {'PASS' if percentage >= 70 else 'NEEDS IMPROVEMENT'}
+                    Your MCQ Score: {score}/{total} ({percentage:.1f}%)
+                    Status: {'PASS' if percentage >= 70 else 'NEEDS IMPROVEMENT'} (MCQs only)
+                    Note: Your PivotTable submissions (Questions 9 & 10) will be reviewed by admins.
                     
                     Regards,
                     Learning & Development Department
@@ -601,8 +525,9 @@ elif page == "📝 Take Test":
                     Name: {name}
                     Employee ID: {employee_id}
                     Department: {department}
-                    Score: {score}/{total} ({percentage:.1f}%)
-                    Status: {'PASS' if percentage >= 70 else 'NEEDS IMPROVEMENT'}
+                    MCQ Score: {score}/{total} ({percentage:.1f}%)
+                    Status: {'PASS' if percentage >= 70 else 'NEEDS IMPROVEMENT'} (MCQs only)
+                    Note: Please review the PivotTable screenshots for Questions 9 & 10 in the Admin Dashboard.
                     """
                     for admin_email in ADMIN_EMAILS:
                         send_email(admin_email.strip(), "New Excel Test Submission", admin_body)
@@ -620,7 +545,7 @@ elif page == "📝 Take Test":
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Score", f"{score}/{total}")
+            st.metric("MCQ Score", f"{score}/{total}")
         with col2:
             st.metric("Percentage", f"{percentage:.1f}%")
         with col3:
@@ -628,40 +553,30 @@ elif page == "📝 Take Test":
             color = "green" if percentage >= 70 else "red"
             st.metric("Result", status)
         
-        # Certificate generation for passing users
+        st.info("Note: Your PivotTable submissions (Questions 9 & 10) will be reviewed by admins separately.")
+        
+        # Certificate generation for passing users (MCQs only)
         if percentage >= 70:
             date = datetime.datetime.now().strftime("%Y-%m-%d")
-            cert_buffer = generate_certificate(
-                st.session_state.user_info["name"],
-                score,
-                total,
-                date
-            )
-
+            cert_buffer = generate_certificate(st.session_state.user_info["name"], score, total, date)
             st.download_button(
-                label="📜 Download Certificate",
+                label="📜 Download Certificate (MCQs only)",
                 data=cert_buffer,
                 file_name=f"Excel_Practice_Certificate_{st.session_state.user_info['name']}.pdf",
                 mime="application/pdf"
             )
         
-        # Detailed results
-        st.markdown("## 📊 Detailed Results")
+        # Detailed results for MCQs
+        st.markdown("## 📊 Detailed Results (MCQs)")
         results_data = []
         for i, (q_id, correct_answer) in enumerate(correct_answers.items(), 1):
             user_answer = st.session_state.user_answers.get(q_id, "Not answered")
-            if q_id in ["q9?", "q9b", "q10"]:
-                is_correct = user_answer and isinstance(user_answer, dict) and all(
-                    abs(float(user_answer.get(k, 0)) - v) <= 0.01 for k, v in correct_answer.items()
-                )
-                user_answer_display = str(user_answer) if user_answer != "Not answered" else user_answer
-            else:
-                is_correct = user_answer == correct_answer
-                user_answer_display = user_answer.upper() if user_answer != "Not answered" else user_answer
+            is_correct = user_answer == correct_answer
+            user_answer_display = user_answer.upper() if user_answer != "Not answered" else user_answer
             results_data.append({
                 "Question": i,
                 "Your Answer": user_answer_display,
-                "Correct Answer": str(correct_answer),
+                "Correct Answer": correct_answer.upper(),
                 "Result": "✅ Correct" if is_correct else "❌ Incorrect"
             })
         
@@ -676,67 +591,6 @@ elif page == "📝 Take Test":
             st.session_state.timer_active = False
             st.session_state.shuffled_questions = []
             st.rerun()
-
-elif page == "📊 Data Analysis":
-    st.markdown('<h1 class="main-header">📊 Employee Data Analysis</h1>', unsafe_allow_html=True)
-    
-    df = pd.DataFrame(employee_data)
-    regional_totals, dept_totals, regional_gender = create_pivot_analysis()
-    
-    # Overview metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Employees", len(df))
-    with col2:
-        st.metric("Total Amount Due", f"₹{df['Total Amount Due'].sum():,}")
-    with col3:
-        st.metric("Regions", df['Region'].nunique())
-    with col4:
-        st.metric("Departments", df['Department'].nunique())
-    
-    # Charts
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("💰 Regional Totals")
-        fig1 = px.bar(regional_totals, x='Region', y='Total Amount Due', 
-                     title="Total Amount Due by Region",
-                     color='Total Amount Due',
-                     color_continuous_scale='Blues')
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        st.subheader("👥 Gender Distribution by Region")
-        fig3 = px.bar(regional_gender, x='Region', y='Count', color='Gender',
-                     title="Employee Count by Region and Gender",
-                     barmode='group')
-        st.plotly_chart(fig3, use_container_width=True)
-    
-    with col2:
-        st.subheader("🏢 Department Totals")
-        fig2 = px.pie(dept_totals, values='Total Amount Due', names='Department',
-                     title="Total Amount Due by Department")
-        st.plotly_chart(fig2, use_container_width=True)
-        
-        st.subheader("📍 Location Distribution")
-        location_counts = df['Location'].value_counts()
-        fig4 = px.bar(x=location_counts.index, y=location_counts.values,
-                     title="Employee Count by Location")
-        st.plotly_chart(fig4, use_container_width=True)
-    
-    # Data tables
-    st.subheader("📋 Pivot Table Results")
-    
-    tab1, tab2, tab3 = st.tabs(["Regional Totals", "Department Totals", "Regional Gender Count"])
-    
-    with tab1:
-        st.dataframe(regional_totals, use_container_width=True)
-    
-    with tab2:
-        st.dataframe(dept_totals.sort_values('Total Amount Due', ascending=False), use_container_width=True)
-    
-    with tab3:
-        pivot_gender = regional_gender.pivot(index='Region', columns='Gender', values='Count').fillna(0)
-        st.dataframe(pivot_gender, use_container_width=True)
 
 elif page == "👨‍💼 Admin Dashboard":
     st.markdown('<h1 class="main-header">👨‍💼 Admin Dashboard</h1>', unsafe_allow_html=True)
@@ -770,14 +624,14 @@ elif page == "👨‍💼 Admin Dashboard":
             with col1:
                 st.metric("Total Submissions", total_submissions)
             with col2:
-                st.metric("Average Score", f"{avg_score:.1f}%")
+                st.metric("Average MCQ Score", f"{avg_score:.1f}%")
             with col3:
-                st.metric("Pass Rate", f"{pass_rate:.1f}%")
+                st.metric("Pass Rate (MCQs)", f"{pass_rate:.1f}%")
             
-            # Detailed Analytics
+            # Detailed Analytics for MCQs
             question_accuracy, performance_over_time, dept_performance, question_details = create_detailed_analytics(submissions)
             
-            st.subheader("📈 Detailed Analytics")
+            st.subheader("📈 Detailed Analytics (MCQs)")
             
             col1, col2 = st.columns(2)
             with col1:
@@ -803,30 +657,74 @@ elif page == "👨‍💼 Admin Dashboard":
                 st.plotly_chart(fig_dept, use_container_width=True)
             
             # Question Details
-            st.subheader("🔍 Question Analysis")
+            st.subheader("🔍 Question Analysis (MCQs)")
             for detail in question_details:
                 st.write(f"**{detail['Question'].upper()} Answer Distribution:**")
                 dist_df = pd.DataFrame.from_dict(detail["Answer Distribution"], orient="index", columns=["Count"])
                 st.dataframe(dist_df, use_container_width=True)
             
-            # Detailed submissions table
+            # Detailed submissions table with PivotTable screenshots
             st.subheader("📋 All Submissions")
             
             display_data = []
             for s in submissions:
-                display_data.append({
+                row = {
                     "Timestamp": s['timestamp'][:19].replace('T', ' '),
                     "Name": s['user_info']['name'],
                     "Employee ID": s['user_info']['employee_id'],
                     "Department": s['user_info']['department'],
                     "Email": s['user_info']['email'],
-                    "Score": f"{s['score']}/{s['total']}",
+                    "MCQ Score": f"{s['score']}/{s['total']}",
                     "Percentage": f"{s['percentage']:.1f}%",
-                    "Status": "PASS" if s['percentage'] >= 70 else "FAIL"
-                })
+                    "Status": "PASS" if s['percentage'] >= 70 else "FAIL",
+                    "Q9a Screenshot": "View",
+                    "Q9b Screenshot": "View",
+                    "Q10 Screenshot": "View"
+                }
+                display_data.append(row)
             
             submissions_df = pd.DataFrame(display_data)
-            st.dataframe(submissions_df, use_container_width=True)
+            
+            # Display the table with clickable buttons to view screenshots
+            for idx, row in submissions_df.iterrows():
+                col1, col2, col3, col4, col5, col6, col7, col8, col9, col10, col11 = st.columns([2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1])
+                with col1:
+                    st.write(row["Timestamp"])
+                with col2:
+                    st.write(row["Name"])
+                with col3:
+                    st.write(row["Employee ID"])
+                with col4:
+                    st.write(row["Department"])
+                with col5:
+                    st.write(row["Email"])
+                with col6:
+                    st.write(row["MCQ Score"])
+                with col7:
+                    st.write(row["Percentage"])
+                with col8:
+                    st.write(row["Status"])
+                with col9:
+                    if st.button("View Q9a", key=f"q9a_{idx}"):
+                        screenshot = submissions[idx]["answers"].get("q9a_screenshot")
+                        if screenshot:
+                            st.image(base64.b64decode(screenshot), caption=f"Q9a PivotTable - {row['Name']}", use_column_width=True)
+                        else:
+                            st.warning("No screenshot uploaded.")
+                with col10:
+                    if st.button("View Q9b", key=f"q9b_{idx}"):
+                        screenshot = submissions[idx]["answers"].get("q9b_screenshot")
+                        if screenshot:
+                            st.image(base64.b64decode(screenshot), caption=f"Q9b PivotTable - {row['Name']}", use_column_width=True)
+                        else:
+                            st.warning("No screenshot uploaded.")
+                with col11:
+                    if st.button("View Q10", key=f"q10_{idx}"):
+                        screenshot = submissions[idx]["answers"].get("q10_screenshot")
+                        if screenshot:
+                            st.image(base64.b64decode(screenshot), caption=f"Q10 PivotTable - {row['Name']}", use_column_width=True)
+                        else:
+                            st.warning("No screenshot uploaded.")
             
             # Download submissions
             if st.button("📥 Download All Submissions (JSON)"):
